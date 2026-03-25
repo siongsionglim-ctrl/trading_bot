@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Bot Control</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; padding: 40px; background: #0f0f0f; color: #0f0; }
+        h1 { color: #00ff00; }
+        button { 
+            padding: 15px 30px; margin: 10px; font-size: 18px; border: none; border-radius: 8px; cursor: pointer;
+        }
+        .start { background: #00cc00; color: white; }
+        .stop  { background: #cc0000; color: white; }
+        .status { background: #0066cc; color: white; }
+        .info { margin-top: 30px; font-size: 18px; }
+        pre { background: #111; padding: 15px; border-radius: 8px; text-align: left; max-width: 600px; margin: 20px auto; }
+    </style>
+</head>
+<body>
+    <h1>🚀 BTC Trading Bot Control</h1>
+    <p>Your Render URL: <strong>https://trading-bot-n45w.onrender.com</strong></p>
+
+    <button class="start" onclick="startBot()">▶️ START BOT</button>
+    <button class="stop"  onclick="stopBot()">⏹️ STOP BOT</button>
+    <button class="status" onclick="checkStatus()">📊 CHECK STATUS</button>
+
+    <div class="info">
+        <h2>Status: <span id="statusText">Checking...</span></h2>
+        <pre id="log"></pre>
+    </div>
+
+    <script>
+        const baseUrl = "https://trading-bot-n45w.onrender.com";
+
+        async function startBot() {
+            const res = await fetch(baseUrl + "/start", { method: "POST" });
+            const data = await res.json();
+            document.getElementById("log").textContent = JSON.stringify(data, null, 2);
+            checkStatus();
+        }
+
+        async function stopBot() {
+            const res = await fetch(baseUrl + "/stop", { method: "POST" });
+            const data = await res.json();
+            document.getElementById("log").textContent = JSON.stringify(data, null, 2);
+            checkStatus();
+        }
+
+        async function checkStatus() {
+            const res = await fetch(baseUrl + "/status");
+            const data = await res.json();
+            document.getElementById("statusText").textContent = data.running ? "🟢 RUNNING" : "🔴 STOPPED";
+            document.getElementById("log").textContent = JSON.stringify(data, null, 2);
+        }
+
+        // Auto check status when page loads
+        window.onload = checkStatus;
+    </script>
+</body>
+</html>
