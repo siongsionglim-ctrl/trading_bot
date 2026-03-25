@@ -1,10 +1,22 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, send_from_directory
 import threading
 import asyncio
 import bot
+import signal
+import sys
+import os
 
 app = Flask(__name__)
 bot_running = False
+bot_thread = None
+
+def signal_handler(sig, frame):
+    print("🛑 Received shutdown signal, stopping bot...")
+    bot.running = False
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
 
 @app.route("/")
 def home():
@@ -14,15 +26,19 @@ def home():
 def ping():
     return "OK", 200
 
+@app.route("/dashboard")
+def dashboard():
+    return send_from_directory(os.getcwd(), "dashboard.html")
+
 @app.route("/start", methods=["GET", "POST"])
 def start_bot():
-    global bot_running
+    global bot_running, bot_thread
     if bot_running:
         return jsonify({"status": "already running"})
     
     bot.running = True
-    thread = threading.Thread(target=run_bot, daemon=True)
-    thread.start()
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
     
     bot_running = True
     return jsonify({"status": "bot started", "running": True})
@@ -39,7 +55,10 @@ def status():
     return jsonify({"running": bot_running})
 
 def run_bot():
-    asyncio.run(bot.run())
+    try:
+        asyncio.run(bot.run())
+    except Exception as e:
+        print(f"Bot crashed: {e}")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
