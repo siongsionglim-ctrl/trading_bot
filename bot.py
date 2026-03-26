@@ -25,37 +25,62 @@ running = True
 higher_tf_bias = {}
 last_higher_tf_time = {}
 
+# Initialize exchange
 exchange = ccxt.binance({
     "apiKey": API_KEY,
     "secret": API_SECRET,
     "enableRateLimit": True,
-    "options": {"defaultType": "future"}
+    "options": {
+        "defaultType": "future",
+        "adjustForTimeDifference": True
+    }
 })
 
-# Load markets safely
+# === FIXED: Load and select Top 30 by real 24h volume ===
 print("📡 Loading Binance futures markets...")
 exchange.load_markets()
 
-# === FIXED: Safe filtering for USDT perpetual futures ===
+# Filter active USDT perpetual futures
 all_futures = []
 for symbol, market in exchange.markets.items():
     try:
         if (symbol.endswith('/USDT') or symbol.endswith('/USDT:USDT')) and \
            market.get('active', False) and \
            (market.get('swap', False) or market.get('future', False)) and \
-           market.get('linear', False):  # USDT-margined
+           market.get('linear', False):
             all_futures.append(symbol)
     except Exception:
         continue
 
-# Take top 30 most liquid pairs (sorted by quoteVolume if available, else alphabetical)
-all_futures.sort()  # fallback
-MAJOR_SYMBOLS = all_futures[:30]
+print(f"🚀 Loaded {len(all_futures)} USDT perpetuals")
 
-print(f"🚀 Loaded {len(all_futures)} USDT perpetuals → Scanning Top {len(MAJOR_SYMBOLS)} liquid pairs")
-print(f"Example: {MAJOR_SYMBOLS[:5] if MAJOR_SYMBOLS else 'None'}")
+# === Sort by real 24h volume (most popular first) ===
+print("🔄 Fetching 24h volume to select Top 30 liquid pairs...")
+try:
+    tickers = exchange.fetch_tickers()
 
-# WebSocket streams (Binance uses BTCUSDT format, no / or :)
+    volume_dict = {}
+    for symbol, ticker in tickers.items():
+        if symbol.endswith('/USDT:USDT') or symbol.endswith('/USDT'):
+            volume_dict[symbol] = float(ticker.get('quoteVolume') or 0)
+
+    sorted_futures = sorted(
+        all_futures,
+        key=lambda s: volume_dict.get(s, 0),
+        reverse=True
+    )
+
+    MAJOR_SYMBOLS = sorted_futures[:30]
+
+    print(f"✅ Selected Top {len(MAJOR_SYMBOLS)} most liquid pairs by 24h volume")
+    print(f"Example: {MAJOR_SYMBOLS[:5]}")
+
+except Exception as e:
+    print(f"⚠️ Volume fetch failed: {e}. Falling back to first 30.")
+    all_futures.sort()
+    MAJOR_SYMBOLS = all_futures[:30]
+
+# WebSocket streams
 streams = [s.replace("/", "").replace(":", "").lower() + "@kline_1m" for s in MAJOR_SYMBOLS]
 ws_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
 
@@ -151,8 +176,6 @@ def get_higher_tf_bias(symbol):
         print(f"⚠️ Higher TF bias error for {symbol}: {e}")
         return higher_tf_bias.get(symbol)
 
-# ... (get_balance, has_position, in_cooldown, can_trade, place_trade remain the same as your original)
-
 def get_balance():
     try:
         bal = exchange.fetch_balance()
@@ -237,8 +260,7 @@ async def run():
                 if 'data' in data and 'k' in data['data']:
                     k = data['data']['k']
                     if k['x']:  # candle closed
-                        raw_symbol = data['data']['s']  # e.g. BTCUSDT
-                        # Map back to our internal symbol (with :USDT if needed)
+                        raw_symbol = data['data']['s']
                         symbol = next((s for s in MAJOR_SYMBOLS if s.replace("/", "").replace(":", "") == raw_symbol), None)
                         if not symbol:
                             continue
@@ -263,8 +285,8 @@ async def run():
                             print(f"🟢 STRONG SIGNAL: {trend} {symbol} | Score: {score} | Price: {price:.2f}")
 
                             free_balance, _ = get_balance()
-                            margin_needed = (free_balance * 0.02 * LEVERAGE) / price   # rough
-                            amount = (free_balance * 0.02) / (price * 0.008)           # rough position sizing
+                            margin_needed = (free_balance * 0.02 * LEVERAGE) / price
+                            amount = (free_balance * 0.02) / (price * 0.008)
 
                             if can_trade(symbol, margin_needed):
                                 place_trade(symbol, trend, amount, price)
