@@ -11,20 +11,18 @@ API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 LEVERAGE = 10
-COOLDOWN = 300          # 5 minutes between trades
-MIN_SCORE = 10          # Strong confidence (pro level)
+COOLDOWN = 300
+MIN_SCORE = 10
 DF_WINDOW = 180
-SCAN_INTERVAL = 50      # seconds between full scans (balanced)
+SCAN_INTERVAL = 50
 
 last_trade_time = 0
 initial_balance = 0
+running = True                    # ← Added for clean stop
 higher_tf_bias = {}
 last_higher_tf_time = {}
 last_balance_time = 0
 
-# =========================
-# EXCHANGE SETUP
-# =========================
 exchange = ccxt.binance({
     "apiKey": API_KEY,
     "secret": API_SECRET,
@@ -32,20 +30,12 @@ exchange = ccxt.binance({
     "options": {"defaultType": "future"}
 })
 
-# Load markets once
-exchange.load_markets()
-# Major liquid coins only (to avoid ban + better quality)
 MAJOR_SYMBOLS = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
     "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "TON/USDT",
     "SUI/USDT", "NEAR/USDT", "TRX/USDT"
 ]
 
-print(f"🚀 Pro Bot Started | Monitoring {len(MAJOR_SYMBOLS)} major pairs")
-
-# =========================
-# INDICATORS
-# =========================
 def apply_indicators(df):
     df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
     df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
@@ -63,9 +53,6 @@ def apply_indicators(df):
 
     return df
 
-# =========================
-# STRATEGY (Solid Pro Confluence)
-# =========================
 def calculate_score(df, symbol):
     if len(df) < 60:
         return 0, None
@@ -76,7 +63,6 @@ def calculate_score(df, symbol):
     score = 0
     trend = None
 
-    # 1. EMA + Price Alignment
     if last["ema20"] > last["ema50"] and last["close"] > last["ema20"]:
         score += 3
         trend = "LONG"
@@ -86,25 +72,21 @@ def calculate_score(df, symbol):
     else:
         return 0, None
 
-    # 2. Higher TF (5m) Confluence
     bias = get_higher_tf_bias(symbol)
     if bias == trend:
         score += 4
     elif bias is not None:
         return 0, None
 
-    # 3. Momentum
     if (trend == "LONG" and last["macd_hist"] > 0) or (trend == "SHORT" and last["macd_hist"] < 0):
         score += 2
     if (trend == "LONG" and 45 < last["rsi"] < 75) or (trend == "SHORT" and 28 < last["rsi"] < 55):
         score += 2
 
-    # 4. Liquidity Sweep + Reversal
     if (last["high"] > prev["high"].max() and last["close"] < last["open"]) or \
        (last["low"] < prev["low"].min() and last["close"] > last["open"]):
         score += 3
 
-    # 5. Volume + Strong Candle
     if last["volume"] > last["vol_avg"] * 1.7:
         score += 2
     body_ratio = abs(last["close"] - last["open"]) / (last["high"] - last["low"] + 1e-9)
@@ -113,7 +95,6 @@ def calculate_score(df, symbol):
 
     return score, trend
 
-# Cached Higher TF Bias
 def get_higher_tf_bias(symbol):
     global higher_tf_bias, last_higher_tf_time
     now = time.time()
@@ -135,21 +116,18 @@ def get_higher_tf_bias(symbol):
     except:
         return higher_tf_bias.get(symbol)
 
-# Safe Balance Check
 def get_balance():
     global last_balance_time
-    if time.time() - last_balance_time < 20:
-        return None, None  # use cached if possible, but for safety we fetch lightly
-    last_balance_time = time.time()
+    now = time.time()
+    if now - last_balance_time < 20:
+        return 0, 0   # safe default
+    last_balance_time = now
     try:
         bal = exchange.fetch_balance()
-        free = bal["free"].get("USDT", 0)
-        total = bal["total"].get("USDT", 0)
-        return free, total
+        return bal["free"].get("USDT", 0), bal["total"].get("USDT", 0)
     except:
         return 0, 0
 
-# Position Check
 def has_position(symbol):
     try:
         positions = exchange.fetch_positions([symbol])
@@ -167,7 +145,7 @@ def can_trade(symbol, required_margin):
     if in_cooldown() or has_position(symbol):
         return False
     free, total = get_balance()
-    if free < 5:                     # ← Your request: min 5 USDT free
+    if free < 5:
         print("💰 Balance too low (<5 USDT)")
         return False
     if free < required_margin:
@@ -177,32 +155,22 @@ def can_trade(symbol, required_margin):
         return False
     return True
 
-# Professional TP/SL Placement
 def place_trade(symbol, side, amount, price):
     global last_trade_time
     try:
         exchange.set_leverage(LEVERAGE, symbol)
 
-        # 1. Open Market Order
         entry_side = "buy" if side == "LONG" else "sell"
         exchange.create_market_order(symbol, entry_side, amount)
-        print(f"✅ {side} ENTRY {symbol} | Amount: {amount:.4f} @ ~{price:.2f}")
+        print(f"✅ {side} ENTRY {symbol} | Amount: {amount:.4f}")
 
-        # 2. Stop Loss (STOP_MARKET)
         sl_price = price * 0.994 if side == "LONG" else price * 1.006
-        sl_side = "sell" if side == "LONG" else "buy"
-        exchange.create_order(
-            symbol, "STOP_MARKET", sl_side, amount, None,
-            {"stopPrice": sl_price, "reduceOnly": True}
-        )
-
-        # 3. Take Profit (TAKE_PROFIT_MARKET)
         tp_price = price * 1.012 if side == "LONG" else price * 0.988
+        sl_side = "sell" if side == "LONG" else "buy"
         tp_side = "sell" if side == "LONG" else "buy"
-        exchange.create_order(
-            symbol, "TAKE_PROFIT_MARKET", tp_side, amount, None,
-            {"stopPrice": tp_price, "reduceOnly": True}
-        )
+
+        exchange.create_order(symbol, "STOP_MARKET", sl_side, amount, None, {"stopPrice": sl_price, "reduceOnly": True})
+        exchange.create_order(symbol, "TAKE_PROFIT_MARKET", tp_side, amount, None, {"stopPrice": tp_price, "reduceOnly": True})
 
         print(f"🚀 {side} {symbol} | TP: {tp_price:.2f} | SL: {sl_price:.2f}")
         last_trade_time = time.time()
@@ -210,21 +178,18 @@ def place_trade(symbol, side, amount, price):
     except Exception as e:
         print(f"❌ Trade error on {symbol}: {e}")
 
-# =========================
-# MAIN 24/7 LOOP (with balance protection)
-# =========================
 async def run():
-    global initial_balance
+    global initial_balance, running
+    running = True
     free, total = get_balance()
     initial_balance = total or 1000
-    print(f"💰 Starting Balance: {initial_balance:.2f} USDT")
+    print(f"💰 Starting Balance: {initial_balance:.2f} USDT | Running 24/7 Mode")
 
-    while True:                                 # True 24/7 loop
+    while running:
         try:
-            # First check balance before heavy scanning
             free, _ = get_balance()
             if free < 5:
-                print("⛔ Balance < 5 USDT → Skipping scan to avoid ban")
+                print("⛔ Balance < 5 USDT → Pausing scan")
                 await asyncio.sleep(30)
                 continue
 
@@ -243,7 +208,7 @@ async def run():
                     continue
 
             candidates.sort(reverse=True, key=lambda x: x[0])
-            top5 = candidates[:3]   # Only top 3 for safety
+            top5 = candidates[:3]
 
             print(f"\n🔥 Top Signals @ {time.strftime('%H:%M:%S')}")
             for score, trend, sym, price in top5:
@@ -252,8 +217,8 @@ async def run():
             if top5:
                 best_score, best_trend, best_symbol, best_price = top5[0]
                 free_balance, _ = get_balance()
-                margin_needed = (free_balance * 0.025 * LEVERAGE) / best_price   # ~2.5% risk
-                amount = (free_balance * 0.025) / (best_price * 0.006)           # rough risk-based
+                margin_needed = (free_balance * 0.025 * LEVERAGE) / best_price
+                amount = (free_balance * 0.025) / (best_price * 0.006)
 
                 if can_trade(best_symbol, margin_needed):
                     place_trade(best_symbol, best_trend, amount, best_price)
@@ -264,8 +229,5 @@ async def run():
             print(f"Scanner error: {e}")
             await asyncio.sleep(15)
 
-# =========================
-# START
-# =========================
 if __name__ == "__main__":
     asyncio.run(run())

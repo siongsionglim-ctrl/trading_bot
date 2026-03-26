@@ -35,7 +35,7 @@ def dashboard():
     try:
         return send_from_directory(os.getcwd(), "dashboard.html")
     except Exception as e:
-        return f"Dashboard file not found. Error: {str(e)}", 404
+        return f"Dashboard file not found: {str(e)}", 404
 
 @app.route("/start", methods=["GET", "POST"])
 def start_bot():
