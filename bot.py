@@ -21,6 +21,10 @@ last_trade_time = 0
 initial_balance = 0
 running = True
 
+# Global caches for higher timeframe bias
+higher_tf_bias = {}
+last_higher_tf_time = {}
+
 exchange = ccxt.binance({
     "apiKey": API_KEY,
     "secret": API_SECRET,
@@ -28,20 +32,34 @@ exchange = ccxt.binance({
     "options": {"defaultType": "future"}
 })
 
-# Load all USDT perpetual futures (but we will limit to top 30 liquid ones)
+# Load markets safely
+print("📡 Loading Binance futures markets...")
 exchange.load_markets()
-all_futures = [s for s in exchange.symbols if s.endswith('/USDT') and exchange.market(s).get('future', False)]
 
-# Take top 30 most liquid pairs to avoid rate limit issues
+# === FIXED: Safe filtering for USDT perpetual futures ===
+all_futures = []
+for symbol, market in exchange.markets.items():
+    try:
+        if (symbol.endswith('/USDT') or symbol.endswith('/USDT:USDT')) and \
+           market.get('active', False) and \
+           (market.get('swap', False) or market.get('future', False)) and \
+           market.get('linear', False):  # USDT-margined
+            all_futures.append(symbol)
+    except Exception:
+        continue
+
+# Take top 30 most liquid pairs (sorted by quoteVolume if available, else alphabetical)
+all_futures.sort()  # fallback
 MAJOR_SYMBOLS = all_futures[:30]
 
-print(f"🚀 WebSocket Bot Started | Scanning Top {len(MAJOR_SYMBOLS)} liquid pairs")
+print(f"🚀 Loaded {len(all_futures)} USDT perpetuals → Scanning Top {len(MAJOR_SYMBOLS)} liquid pairs")
+print(f"Example: {MAJOR_SYMBOLS[:5] if MAJOR_SYMBOLS else 'None'}")
 
-# WebSocket streams
-streams = [s.lower().replace("/", "") + "@kline_1m" for s in MAJOR_SYMBOLS]
+# WebSocket streams (Binance uses BTCUSDT format, no / or :)
+streams = [s.replace("/", "").replace(":", "").lower() + "@kline_1m" for s in MAJOR_SYMBOLS]
 ws_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
 
-# Data storage for each symbol
+# Data storage
 dataframes = {symbol: pd.DataFrame(columns=["open", "high", "low", "close", "volume"]) for symbol in MAJOR_SYMBOLS}
 
 def set_leverage_for_all():
@@ -113,7 +131,6 @@ def calculate_score(df, symbol):
     return score, trend
 
 def get_higher_tf_bias(symbol):
-    global higher_tf_bias, last_higher_tf_time
     now = time.time()
     if symbol in last_higher_tf_time and now - last_higher_tf_time.get(symbol, 0) < 600:
         return higher_tf_bias.get(symbol)
@@ -130,8 +147,11 @@ def get_higher_tf_bias(symbol):
         higher_tf_bias[symbol] = bias
         last_higher_tf_time[symbol] = now
         return bias
-    except:
+    except Exception as e:
+        print(f"⚠️ Higher TF bias error for {symbol}: {e}")
         return higher_tf_bias.get(symbol)
+
+# ... (get_balance, has_position, in_cooldown, can_trade, place_trade remain the same as your original)
 
 def get_balance():
     try:
@@ -217,8 +237,11 @@ async def run():
                 if 'data' in data and 'k' in data['data']:
                     k = data['data']['k']
                     if k['x']:  # candle closed
-                        raw_symbol = data['data']['s']
-                        symbol = raw_symbol if raw_symbol.endswith('USDT') else raw_symbol + '/USDT'
+                        raw_symbol = data['data']['s']  # e.g. BTCUSDT
+                        # Map back to our internal symbol (with :USDT if needed)
+                        symbol = next((s for s in MAJOR_SYMBOLS if s.replace("/", "").replace(":", "") == raw_symbol), None)
+                        if not symbol:
+                            continue
 
                         new_row = {
                             "open": float(k["o"]),
@@ -240,8 +263,8 @@ async def run():
                             print(f"🟢 STRONG SIGNAL: {trend} {symbol} | Score: {score} | Price: {price:.2f}")
 
                             free_balance, _ = get_balance()
-                            margin_needed = (free_balance * 0.02 * LEVERAGE) / price
-                            amount = (free_balance * 0.02) / (price * 0.008)
+                            margin_needed = (free_balance * 0.02 * LEVERAGE) / price   # rough
+                            amount = (free_balance * 0.02) / (price * 0.008)           # rough position sizing
 
                             if can_trade(symbol, margin_needed):
                                 place_trade(symbol, trend, amount, price)
