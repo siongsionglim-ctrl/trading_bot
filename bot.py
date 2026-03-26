@@ -20,9 +20,6 @@ DF_WINDOW = 180
 last_trade_time = 0
 initial_balance = 0
 running = True
-higher_tf_bias = {}
-last_higher_tf_time = {}
-last_balance_time = 0
 
 exchange = ccxt.binance({
     "apiKey": API_KEY,
@@ -33,21 +30,18 @@ exchange = ccxt.binance({
 
 MAJOR_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
 
-# WebSocket streams for multiple symbols
+# WebSocket streams
 streams = [s.lower().replace("/", "") + "@kline_1m" for s in MAJOR_SYMBOLS]
 ws_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
 
 print("🚀 WebSocket Bot Started | Monitoring 5 major pairs")
 
-def set_leverage_for_all():
-    for symbol in MAJOR_SYMBOLS:
-        try:
-            exchange.set_leverage(LEVERAGE, symbol)
-            print(f"✅ Leverage {LEVERAGE}x set for {symbol}")
-        except Exception as e:
-            print(f"⚠️ Failed to set leverage for {symbol}: {e}")
+# Data storage for each symbol
+dataframes = {symbol: pd.DataFrame(columns=["open", "high", "low", "close", "volume"]) for symbol in MAJOR_SYMBOLS}
 
 def apply_indicators(df):
+    if len(df) < 20:
+        return df
     df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
     df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
     df["vol_avg"] = df["volume"].rolling(20).mean()
@@ -127,9 +121,6 @@ def get_higher_tf_bias(symbol):
         return higher_tf_bias.get(symbol)
 
 def get_balance():
-    global last_balance_time
-    now = time.time()
-    last_balance_time = now
     try:
         bal = exchange.fetch_balance()
         free = float(bal.get("free", {}).get("USDT", 0))
@@ -217,9 +208,8 @@ async def run():
                 if 'data' in data and 'k' in data['data']:
                     k = data['data']['k']
                     if k['x']:  # Only process when candle is closed
-                        symbol = data['data']['s']
-                        if not symbol.endswith('USDT'):
-                            symbol += '/USDT'
+                        raw_symbol = data['data']['s']
+                        symbol = raw_symbol if raw_symbol.endswith('USDT') else raw_symbol + '/USDT'
 
                         new_row = {
                             "open": float(k["o"]),
@@ -229,29 +219,29 @@ async def run():
                             "volume": float(k["v"])
                         }
 
-                        # Rebuild recent dataframe for indicators
-                        try:
-                            ohlcv = exchange.fetch_ohlcv(symbol, "1m", limit=DF_WINDOW)
-                            df = pd.DataFrame(ohlcv, columns=["ts","o","h","l","c","v"])[["o","h","l","c","v"]].astype(float)
-                            df = apply_indicators(df)
+                        # Update dataframe for this symbol
+                        df = dataframes.get(symbol, pd.DataFrame(columns=["open", "high", "low", "close", "volume"]))
+                        df = pd.concat([df, pd.DataFrame([new_row])]).tail(DF_WINDOW)
+                        dataframes[symbol] = df
 
-                            score, trend = calculate_score(df, symbol)
-                            if score >= MIN_SCORE and trend:
-                                price = df.iloc[-1]["close"]
-                                print(f"🟢 STRONG SIGNAL: {trend} {symbol} | Score: {score} | Price: {price:.2f}")
+                        df = apply_indicators(df)
 
-                                free_balance, _ = get_balance()
-                                margin_needed = (free_balance * 0.02 * LEVERAGE) / price
-                                amount = (free_balance * 0.02) / (price * 0.008)
+                        score, trend = calculate_score(df, symbol)
+                        if score >= MIN_SCORE and trend:
+                            price = df.iloc[-1]["close"]
+                            print(f"🟢 STRONG SIGNAL: {trend} {symbol} | Score: {score} | Price: {price:.2f}")
 
-                                if can_trade(symbol, margin_needed):
-                                    place_trade(symbol, trend, amount, price)
-                        except Exception as inner_e:
-                            print(f"Processing error for {symbol}: {inner_e}")
+                            free_balance, _ = get_balance()
+                            margin_needed = (free_balance * 0.02 * LEVERAGE) / price
+                            amount = (free_balance * 0.02) / (price * 0.008)
+
+                            if can_trade(symbol, margin_needed):
+                                place_trade(symbol, trend, amount, price)
 
             except Exception as e:
-                print(f"WebSocket error: {e}")
-                await asyncio.sleep(5)
+                print(f"WebSocket processing error: {e}")
+
+            await asyncio.sleep(0.05)
 
 if __name__ == "__main__":
     asyncio.run(run())

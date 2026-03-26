@@ -1,1 +1,1 @@
-﻿web: gunicorn server:app --timeout 300 --workers 1 --log-level info
+﻿web: gunicorn server:app --timeout 1800 --workers 1 --log-level info --keep-alive 60

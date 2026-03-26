@@ -73,3 +73,7 @@ def run_bot():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
+@app.route("/keepalive")
+def keepalive():
+    return "Keep-alive OK", 200
