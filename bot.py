@@ -54,7 +54,24 @@ for symbol, market in exchange.markets.items():
 
 print(f"🚀 Loaded {len(all_futures)} USDT perpetuals")
 
-# === Sort by real 24h volume (most popular first) ===
+# ==================== FIXED MARKET LOADING - TOP 30 BY VOLUME ====================
+print("📡 Loading Binance futures markets...")
+exchange.load_markets()
+
+all_futures = []
+for symbol, market in exchange.markets.items():
+    try:
+        if (symbol.endswith('/USDT:USDT') or symbol.endswith('/USDT')) and \
+           market.get('active', False) and \
+           market.get('swap', False) and \
+           market.get('linear', False):
+            all_futures.append(symbol)
+    except Exception:
+        continue
+
+print(f"🚀 Loaded {len(all_futures)} USDT perpetuals")
+
+# === Sort by real 24h volume (most popular & liquid first) ===
 print("🔄 Fetching 24h volume to select Top 30 liquid pairs...")
 try:
     tickers = exchange.fetch_tickers()
@@ -73,7 +90,7 @@ try:
     MAJOR_SYMBOLS = sorted_futures[:30]
 
     print(f"✅ Selected Top {len(MAJOR_SYMBOLS)} most liquid pairs by 24h volume")
-    print(f"Example: {MAJOR_SYMBOLS[:5]}")
+    print(f"Example: {MAJOR_SYMBOLS[:8]}")   # This should show BTC, ETH, SOL, etc.
 
 except Exception as e:
     print(f"⚠️ Volume fetch failed: {e}. Falling back to first 30.")
