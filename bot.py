@@ -1,6 +1,5 @@
 import asyncio
 import time
-import os
 import ccxt
 import pandas as pd
 from dotenv import load_dotenv
@@ -13,12 +12,12 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 LEVERAGE = 10
 COOLDOWN = 300
 MIN_SCORE = 10
-DF_WINDOW = 180
-SCAN_INTERVAL = 50
+DF_WINDOW = 150
+SCAN_INTERVAL = 90   # Increased to reduce rate limit risk
 
 last_trade_time = 0
 initial_balance = 0
-running = True                    # ← Added for clean stop
+running = True
 higher_tf_bias = {}
 last_higher_tf_time = {}
 last_balance_time = 0
@@ -30,11 +29,9 @@ exchange = ccxt.binance({
     "options": {"defaultType": "future"}
 })
 
-MAJOR_SYMBOLS = [
-    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
-    "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "TON/USDT",
-    "SUI/USDT", "NEAR/USDT", "TRX/USDT"
-]
+MAJOR_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
+
+print("🚀 Light Pro Bot Started | Monitoring 5 major pairs only")
 
 def apply_indicators(df):
     df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
@@ -56,7 +53,6 @@ def apply_indicators(df):
 def calculate_score(df, symbol):
     if len(df) < 60:
         return 0, None
-
     last = df.iloc[-1]
     prev = df.iloc[-8:-1]
 
@@ -98,11 +94,11 @@ def calculate_score(df, symbol):
 def get_higher_tf_bias(symbol):
     global higher_tf_bias, last_higher_tf_time
     now = time.time()
-    if symbol in last_higher_tf_time and now - last_higher_tf_time.get(symbol, 0) < 300:
+    if symbol in last_higher_tf_time and now - last_higher_tf_time.get(symbol, 0) < 600:  # 10 min cache
         return higher_tf_bias.get(symbol)
 
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, "5m", limit=70)
+        ohlcv = exchange.fetch_ohlcv(symbol, "5m", limit=50)
         df5 = pd.DataFrame(ohlcv, columns=["ts","o","h","l","c","v"])[["o","h","l","c","v"]].astype(float)
         df5 = apply_indicators(df5)
         last = df5.iloc[-1]
@@ -119,26 +115,17 @@ def get_higher_tf_bias(symbol):
 def get_balance():
     global last_balance_time
     now = time.time()
-    
-    # Force fetch every 15 seconds
-    if now - last_balance_time < 15:
-        try:
-            bal = exchange.fetch_balance()
-            free = float(bal.get("free", {}).get("USDT", 0))
-            total = float(bal.get("total", {}).get("USDT", 0))
-            return free, total
-        except:
-            pass
-    
+    if now - last_balance_time < 30:   # longer cache
+        return 0, 0
     last_balance_time = now
     try:
         bal = exchange.fetch_balance()
         free = float(bal.get("free", {}).get("USDT", 0))
         total = float(bal.get("total", {}).get("USDT", 0))
-        print(f"💰 Balance fetched → Free: {free:.2f} USDT | Total: {total:.2f} USDT")
+        print(f"💰 Balance: Free {free:.2f} | Total {total:.2f} USDT")
         return free, total
     except Exception as e:
-        print(f"⚠️ Balance fetch failed: {e}")
+        print(f"Balance fetch error: {e}")
         return 0, 0
 
 def has_position(symbol):
@@ -159,7 +146,7 @@ def can_trade(symbol, required_margin):
         return False
     free, total = get_balance()
     if free < 5:
-        print("💰 Balance too low (<5 USDT)")
+        print(f"⛔ Free balance too low ({free:.2f})")
         return False
     if free < required_margin:
         return False
@@ -172,7 +159,6 @@ def place_trade(symbol, side, amount, price):
     global last_trade_time
     try:
         exchange.set_leverage(LEVERAGE, symbol)
-
         entry_side = "buy" if side == "LONG" else "sell"
         exchange.create_market_order(symbol, entry_side, amount)
         print(f"✅ {side} ENTRY {symbol} | Amount: {amount:.4f}")
@@ -187,24 +173,21 @@ def place_trade(symbol, side, amount, price):
 
         print(f"🚀 {side} {symbol} | TP: {tp_price:.2f} | SL: {sl_price:.2f}")
         last_trade_time = time.time()
-
     except Exception as e:
-        print(f"❌ Trade error on {symbol}: {e}")
+        print(f"Trade error on {symbol}: {e}")
 
 async def run():
     global initial_balance, running
     running = True
-    
     free, total = get_balance()
     initial_balance = total or 100
-    print(f"💰 Bot Started | Total Balance: {initial_balance:.2f} USDT | Free: {free:.2f} USDT")
+    print(f"💰 Bot Started | Total: {initial_balance:.2f} USDT")
 
     while running:
         try:
             free, total = get_balance()
-            
             if free < 5:
-                print(f"⛔ Free USDT too low ({free:.2f}) → Waiting...")
+                print(f"⛔ Free USDT too low ({free:.2f}) → Waiting 30s")
                 await asyncio.sleep(30)
                 continue
 
@@ -223,7 +206,7 @@ async def run():
                     continue
 
             candidates.sort(reverse=True, key=lambda x: x[0])
-            top5 = candidates[:3]
+            top5 = candidates[:2]   # Even more conservative
 
             print(f"\n🔥 Top Signals @ {time.strftime('%H:%M:%S')}")
             for score, trend, sym, price in top5:
@@ -232,8 +215,8 @@ async def run():
             if top5:
                 best_score, best_trend, best_symbol, best_price = top5[0]
                 free_balance, _ = get_balance()
-                margin_needed = (free_balance * 0.025 * LEVERAGE) / best_price
-                amount = (free_balance * 0.025) / (best_price * 0.006)
+                margin_needed = (free_balance * 0.02 * LEVERAGE) / best_price
+                amount = (free_balance * 0.02) / (best_price * 0.008)
 
                 if can_trade(best_symbol, margin_needed):
                     place_trade(best_symbol, best_trend, amount, best_price)
@@ -242,7 +225,7 @@ async def run():
 
         except Exception as e:
             print(f"Scanner error: {e}")
-            await asyncio.sleep(15)
+            await asyncio.sleep(20)
 
 if __name__ == "__main__":
     asyncio.run(run())
