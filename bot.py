@@ -113,20 +113,21 @@ def get_higher_tf_bias(symbol):
     except:
         return higher_tf_bias.get(symbol)
 
+# Fixed Balance Function
 def get_balance():
     global last_balance_time
     now = time.time()
-    if now - last_balance_time < 30:
+    if now - last_balance_time < 20:
         return 0, 0
     last_balance_time = now
     try:
         bal = exchange.fetch_balance()
         free = float(bal.get("free", {}).get("USDT", 0))
         total = float(bal.get("total", {}).get("USDT", 0))
-        print(f"💰 Balance: Free {free:.2f} | Total {total:.2f} USDT")
+        print(f"💰 Balance fetched → Free: {free:.2f} | Total: {total:.2f} USDT")
         return free, total
     except Exception as e:
-        print(f"Balance fetch error: {e}")
+        print(f"⚠️ Balance fetch error: {e}")
         return 0, 0
 
 def has_position(symbol):
@@ -147,7 +148,7 @@ def can_trade(symbol, required_margin):
         return False
     free, total = get_balance()
     if free < 5:
-        print(f"⛔ Free balance too low ({free:.2f})")
+        print(f"⛔ Free balance too low ({free:.2f} USDT)")
         return False
     if free < required_margin:
         return False
@@ -182,13 +183,13 @@ async def run():
     running = True
     free, total = get_balance()
     initial_balance = total or 100
-    print(f"💰 Bot Started | Total: {initial_balance:.2f} USDT")
+    print(f"💰 Bot Started | Total Balance: {initial_balance:.2f} USDT")
 
     while running:
         try:
             free, total = get_balance()
             if free < 5:
-                print(f"⛔ Free USDT too low ({free:.2f}) → Waiting 30s")
+                print(f"⛔ Free USDT too low ({free:.2f}) → Waiting...")
                 await asyncio.sleep(30)
                 continue
 
