@@ -1,8 +1,10 @@
 import asyncio
+import json
 import time
 import os
 import ccxt
 import pandas as pd
+import websockets
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,8 +15,7 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 LEVERAGE = 10
 COOLDOWN = 300
 MIN_SCORE = 10
-DF_WINDOW = 150
-SCAN_INTERVAL = 90
+DF_WINDOW = 180
 
 last_trade_time = 0
 initial_balance = 0
@@ -32,9 +33,12 @@ exchange = ccxt.binance({
 
 MAJOR_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
 
-print("🚀 Light Pro Bot Started | Monitoring 5 major pairs")
+# WebSocket streams for multiple symbols
+streams = [s.lower().replace("/", "") + "@kline_1m" for s in MAJOR_SYMBOLS]
+ws_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
 
-# Set leverage once at startup for all symbols
+print("🚀 WebSocket Bot Started | Monitoring 5 major pairs")
+
 def set_leverage_for_all():
     for symbol in MAJOR_SYMBOLS:
         try:
@@ -151,6 +155,7 @@ def in_cooldown():
 
 def can_trade(symbol, required_margin):
     if in_cooldown() or has_position(symbol):
+        print(f"❌ can_trade blocked for {symbol} (cooldown or position)")
         return False
     free, total = get_balance()
     if free < 5:
@@ -162,24 +167,18 @@ def can_trade(symbol, required_margin):
     if total < initial_balance * 0.70:
         print("🚨 Max drawdown reached")
         return False
+    print(f"✅ can_trade PASSED for {symbol}")
     return True
 
 def place_trade(symbol, side, amount, price):
     global last_trade_time
     try:
-        # Set leverage before every trade (safe)
+        print(f"🔄 Opening {side} order for {symbol}...")
         exchange.set_leverage(LEVERAGE, symbol)
         entry_side = "buy" if side == "LONG" else "sell"
         
-        # Minimum order size protection
-        min_notional = 10  # minimum ~10 USDT
-        notional = amount * price
-        if notional < min_notional:
-            print(f"⚠️ Order too small ({notional:.2f} USDT), skipped")
-            return
-
         exchange.create_market_order(symbol, entry_side, amount)
-        print(f"✅ {side} ENTRY {symbol} | Amount: {amount:.4f} | Notional: {notional:.2f} USDT")
+        print(f"✅ {side} ENTRY FILLED {symbol} | Amount: {amount:.4f}")
 
         sl_price = price * 0.994 if side == "LONG" else price * 1.006
         tp_price = price * 1.012 if side == "LONG" else price * 0.988
@@ -198,61 +197,61 @@ def place_trade(symbol, side, amount, price):
 async def run():
     global initial_balance, running
     running = True
-    
+
     # Set leverage at startup
     set_leverage_for_all()
 
     free, total = get_balance()
     initial_balance = total or 100
     print(f"💰 Bot Started | Total Balance: {initial_balance:.2f} USDT")
+    print(f"🔌 Connecting to Binance WebSocket...")
 
-    while running:
-        try:
-            free, total = get_balance()
-            if free < 5:
-                print(f"⛔ Free USDT too low ({free:.2f}) → Waiting...")
-                await asyncio.sleep(30)
-                continue
+    async with websockets.connect(ws_url) as ws:
+        print("✅ WebSocket connected successfully - Receiving live 1m candles")
 
-            candidates = []
-            for symbol in MAJOR_SYMBOLS:
-                try:
-                    ohlcv = exchange.fetch_ohlcv(symbol, "1m", limit=DF_WINDOW)
-                    df = pd.DataFrame(ohlcv, columns=["ts","o","h","l","c","v"])[["o","h","l","c","v"]].astype(float)
-                    df = apply_indicators(df)
+        while running:
+            try:
+                message = await ws.recv()
+                data = json.loads(message)
 
-                    score, trend = calculate_score(df, symbol)
-                    if score >= MIN_SCORE and trend:
-                        price = df.iloc[-1]["close"]
-                        candidates.append((score, trend, symbol, price))
-                except:
-                    continue
+                if 'data' in data and 'k' in data['data']:
+                    k = data['data']['k']
+                    if k['x']:  # Only process when candle is closed
+                        symbol = data['data']['s']
+                        if not symbol.endswith('USDT'):
+                            symbol += '/USDT'
 
-            candidates.sort(reverse=True, key=lambda x: x[0])
-            top5 = candidates[:2]
+                        new_row = {
+                            "open": float(k["o"]),
+                            "high": float(k["h"]),
+                            "low": float(k["l"]),
+                            "close": float(k["c"]),
+                            "volume": float(k["v"])
+                        }
 
-            print(f"\n🔥 Top Signals @ {time.strftime('%H:%M:%S')}")
-            for score, trend, sym, price in top5:
-                print(f"   Score: {score} | {trend} | {sym} @ {price:.2f}")
+                        # Rebuild recent dataframe for indicators
+                        try:
+                            ohlcv = exchange.fetch_ohlcv(symbol, "1m", limit=DF_WINDOW)
+                            df = pd.DataFrame(ohlcv, columns=["ts","o","h","l","c","v"])[["o","h","l","c","v"]].astype(float)
+                            df = apply_indicators(df)
 
-            if top5:
-                best_score, best_trend, best_symbol, best_price = top5[0]
-                free_balance, _ = get_balance()
-                margin_needed = (free_balance * 0.02 * LEVERAGE) / best_price
-                amount = (free_balance * 0.02) / (best_price * 0.008)
+                            score, trend = calculate_score(df, symbol)
+                            if score >= MIN_SCORE and trend:
+                                price = df.iloc[-1]["close"]
+                                print(f"🟢 STRONG SIGNAL: {trend} {symbol} | Score: {score} | Price: {price:.2f}")
 
-                print(f"📊 Trying to open: {best_trend} {best_symbol} | Score: {best_score} | Amount: {amount:.6f}")
+                                free_balance, _ = get_balance()
+                                margin_needed = (free_balance * 0.02 * LEVERAGE) / price
+                                amount = (free_balance * 0.02) / (price * 0.008)
 
-                if can_trade(best_symbol, margin_needed):
-                    place_trade(best_symbol, best_trend, amount, best_price)
-                else:
-                    print("❌ Order blocked by can_trade()")
+                                if can_trade(symbol, margin_needed):
+                                    place_trade(symbol, trend, amount, price)
+                        except Exception as inner_e:
+                            print(f"Processing error for {symbol}: {inner_e}")
 
-            await asyncio.sleep(SCAN_INTERVAL)
-
-        except Exception as e:
-            print(f"Scanner error: {e}")
-            await asyncio.sleep(20)
+            except Exception as e:
+                print(f"WebSocket error: {e}")
+                await asyncio.sleep(5)
 
 if __name__ == "__main__":
     asyncio.run(run())
