@@ -1,5 +1,6 @@
 import asyncio
 import time
+import os
 import ccxt
 import pandas as pd
 from dotenv import load_dotenv
@@ -13,7 +14,7 @@ LEVERAGE = 10
 COOLDOWN = 300
 MIN_SCORE = 10
 DF_WINDOW = 150
-SCAN_INTERVAL = 90   # Increased to reduce rate limit risk
+SCAN_INTERVAL = 90
 
 last_trade_time = 0
 initial_balance = 0
@@ -31,7 +32,7 @@ exchange = ccxt.binance({
 
 MAJOR_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
 
-print("🚀 Light Pro Bot Started | Monitoring 5 major pairs only")
+print("🚀 Light Pro Bot Started | Monitoring 5 major pairs")
 
 def apply_indicators(df):
     df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
@@ -94,7 +95,7 @@ def calculate_score(df, symbol):
 def get_higher_tf_bias(symbol):
     global higher_tf_bias, last_higher_tf_time
     now = time.time()
-    if symbol in last_higher_tf_time and now - last_higher_tf_time.get(symbol, 0) < 600:  # 10 min cache
+    if symbol in last_higher_tf_time and now - last_higher_tf_time.get(symbol, 0) < 600:
         return higher_tf_bias.get(symbol)
 
     try:
@@ -115,7 +116,7 @@ def get_higher_tf_bias(symbol):
 def get_balance():
     global last_balance_time
     now = time.time()
-    if now - last_balance_time < 30:   # longer cache
+    if now - last_balance_time < 30:
         return 0, 0
     last_balance_time = now
     try:
@@ -206,7 +207,7 @@ async def run():
                     continue
 
             candidates.sort(reverse=True, key=lambda x: x[0])
-            top5 = candidates[:2]   # Even more conservative
+            top5 = candidates[:2]
 
             print(f"\n🔥 Top Signals @ {time.strftime('%H:%M:%S')}")
             for score, trend, sym, price in top5:
