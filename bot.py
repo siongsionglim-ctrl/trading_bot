@@ -113,12 +113,11 @@ def get_higher_tf_bias(symbol):
     except:
         return higher_tf_bias.get(symbol)
 
-# Fixed Balance Function
+# ==================== FIXED BALANCE FUNCTION ====================
 def get_balance():
     global last_balance_time
     now = time.time()
-    if now - last_balance_time < 20:
-        return 0, 0
+    # Force fresh fetch every 15 seconds
     last_balance_time = now
     try:
         bal = exchange.fetch_balance()
