@@ -2,16 +2,16 @@ from flask import Flask, jsonify, send_from_directory
 import threading
 import asyncio
 import bot
+import os
 import signal
 import sys
-import os
 
 app = Flask(__name__)
 bot_running = False
 bot_thread = None
 
 def signal_handler(sig, frame):
-    print("🛑 Received shutdown signal, stopping bot...")
+    print("🛑 Shutdown signal received")
     bot.running = False
     sys.exit(0)
 
@@ -34,12 +34,12 @@ def dashboard():
 def start_bot():
     global bot_running, bot_thread
     if bot_running:
-        return jsonify({"status": "already running"})
-    
+        return jsonify({"status": "already running", "running": True})
+
     bot.running = True
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
-    
+
     bot_running = True
     return jsonify({"status": "bot started", "running": True})
 
@@ -52,13 +52,18 @@ def stop_bot():
 
 @app.route("/status")
 def status():
-    return jsonify({"running": bot_running})
+    try:
+        return jsonify({"running": bot_running})
+    except Exception as e:
+        return jsonify({"running": False, "error": str(e)}), 500
 
 def run_bot():
     try:
         asyncio.run(bot.run())
     except Exception as e:
-        print(f"Bot crashed: {e}")
+        print(f"❌ Bot crashed: {e}")
+        global bot_running
+        bot_running = False
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
