@@ -28,15 +28,20 @@ exchange = ccxt.binance({
     "options": {"defaultType": "future"}
 })
 
-MAJOR_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
+# Load all USDT perpetual futures (but we will limit to top 30 liquid ones)
+exchange.load_markets()
+all_futures = [s for s in exchange.symbols if s.endswith('/USDT') and exchange.market(s).get('future', False)]
+
+# Take top 30 most liquid pairs to avoid rate limit issues
+MAJOR_SYMBOLS = all_futures[:30]
+
+print(f"🚀 WebSocket Bot Started | Scanning Top {len(MAJOR_SYMBOLS)} liquid pairs")
 
 # WebSocket streams
 streams = [s.lower().replace("/", "") + "@kline_1m" for s in MAJOR_SYMBOLS]
 ws_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
 
-print("🚀 WebSocket Bot Started | Monitoring 5 major pairs")
-
-# Data storage for each symbol (Important: defined globally)
+# Data storage for each symbol
 dataframes = {symbol: pd.DataFrame(columns=["open", "high", "low", "close", "volume"]) for symbol in MAJOR_SYMBOLS}
 
 def set_leverage_for_all():
@@ -154,19 +159,16 @@ def in_cooldown():
 
 def can_trade(symbol, required_margin):
     if in_cooldown() or has_position(symbol):
-        print(f"❌ can_trade blocked for {symbol} (cooldown or position)")
         return False
     free, total = get_balance()
     if free < 5:
         print(f"⛔ Free balance too low ({free:.2f} USDT)")
         return False
     if free < required_margin:
-        print(f"⛔ Not enough margin for {symbol}")
         return False
     if total < initial_balance * 0.70:
         print("🚨 Max drawdown reached")
         return False
-    print(f"✅ can_trade PASSED for {symbol}")
     return True
 
 def place_trade(symbol, side, amount, price):
@@ -197,7 +199,6 @@ async def run():
     global initial_balance, running
     running = True
 
-    # Set leverage at startup
     set_leverage_for_all()
 
     free, total = get_balance()
@@ -206,7 +207,7 @@ async def run():
     print(f"🔌 Connecting to Binance WebSocket...")
 
     async with websockets.connect(ws_url) as ws:
-        print("✅ WebSocket connected successfully - Receiving live 1m candles")
+        print("✅ WebSocket connected successfully")
 
         while running:
             try:
@@ -215,7 +216,7 @@ async def run():
 
                 if 'data' in data and 'k' in data['data']:
                     k = data['data']['k']
-                    if k['x']:  # Only process when candle is closed
+                    if k['x']:  # candle closed
                         raw_symbol = data['data']['s']
                         symbol = raw_symbol if raw_symbol.endswith('USDT') else raw_symbol + '/USDT'
 
@@ -227,7 +228,6 @@ async def run():
                             "volume": float(k["v"])
                         }
 
-                        # Update dataframe for this symbol
                         df = dataframes.get(symbol, pd.DataFrame(columns=["open", "high", "low", "close", "volume"]))
                         df = pd.concat([df, pd.DataFrame([new_row])]).tail(DF_WINDOW)
                         dataframes[symbol] = df
@@ -247,7 +247,7 @@ async def run():
                                 place_trade(symbol, trend, amount, price)
 
             except Exception as e:
-                print(f"WebSocket processing error: {e}")
+                print(f"WebSocket error: {e}")
 
             await asyncio.sleep(0.05)
 
