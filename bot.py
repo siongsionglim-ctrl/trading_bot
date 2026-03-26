@@ -34,6 +34,15 @@ MAJOR_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
 
 print("🚀 Light Pro Bot Started | Monitoring 5 major pairs")
 
+# Set leverage once at startup for all symbols
+def set_leverage_for_all():
+    for symbol in MAJOR_SYMBOLS:
+        try:
+            exchange.set_leverage(LEVERAGE, symbol)
+            print(f"✅ Leverage {LEVERAGE}x set for {symbol}")
+        except Exception as e:
+            print(f"⚠️ Failed to set leverage for {symbol}: {e}")
+
 def apply_indicators(df):
     df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
     df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
@@ -113,11 +122,9 @@ def get_higher_tf_bias(symbol):
     except:
         return higher_tf_bias.get(symbol)
 
-# ==================== FIXED BALANCE FUNCTION ====================
 def get_balance():
     global last_balance_time
     now = time.time()
-    # Force fresh fetch every 15 seconds
     last_balance_time = now
     try:
         bal = exchange.fetch_balance()
@@ -150,6 +157,7 @@ def can_trade(symbol, required_margin):
         print(f"⛔ Free balance too low ({free:.2f} USDT)")
         return False
     if free < required_margin:
+        print(f"⛔ Not enough margin for {symbol}")
         return False
     if total < initial_balance * 0.70:
         print("🚨 Max drawdown reached")
@@ -159,10 +167,19 @@ def can_trade(symbol, required_margin):
 def place_trade(symbol, side, amount, price):
     global last_trade_time
     try:
+        # Set leverage before every trade (safe)
         exchange.set_leverage(LEVERAGE, symbol)
         entry_side = "buy" if side == "LONG" else "sell"
+        
+        # Minimum order size protection
+        min_notional = 10  # minimum ~10 USDT
+        notional = amount * price
+        if notional < min_notional:
+            print(f"⚠️ Order too small ({notional:.2f} USDT), skipped")
+            return
+
         exchange.create_market_order(symbol, entry_side, amount)
-        print(f"✅ {side} ENTRY {symbol} | Amount: {amount:.4f}")
+        print(f"✅ {side} ENTRY {symbol} | Amount: {amount:.4f} | Notional: {notional:.2f} USDT")
 
         sl_price = price * 0.994 if side == "LONG" else price * 1.006
         tp_price = price * 1.012 if side == "LONG" else price * 0.988
@@ -174,12 +191,17 @@ def place_trade(symbol, side, amount, price):
 
         print(f"🚀 {side} {symbol} | TP: {tp_price:.2f} | SL: {sl_price:.2f}")
         last_trade_time = time.time()
+
     except Exception as e:
-        print(f"Trade error on {symbol}: {e}")
+        print(f"❌ Trade error on {symbol}: {e}")
 
 async def run():
     global initial_balance, running
     running = True
+    
+    # Set leverage at startup
+    set_leverage_for_all()
+
     free, total = get_balance()
     initial_balance = total or 100
     print(f"💰 Bot Started | Total Balance: {initial_balance:.2f} USDT")
@@ -219,8 +241,12 @@ async def run():
                 margin_needed = (free_balance * 0.02 * LEVERAGE) / best_price
                 amount = (free_balance * 0.02) / (best_price * 0.008)
 
+                print(f"📊 Trying to open: {best_trend} {best_symbol} | Score: {best_score} | Amount: {amount:.6f}")
+
                 if can_trade(best_symbol, margin_needed):
                     place_trade(best_symbol, best_trend, amount, best_price)
+                else:
+                    print("❌ Order blocked by can_trade()")
 
             await asyncio.sleep(SCAN_INTERVAL)
 
