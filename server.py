@@ -12,7 +12,8 @@ bot_thread = None
 
 def signal_handler(sig, frame):
     print("🛑 Shutdown signal received")
-    bot.running = False
+    if hasattr(bot, 'running'):
+        bot.running = False
     sys.exit(0)
 
 signal.signal(signal.SIGTERM, signal_handler)
@@ -35,7 +36,8 @@ def dashboard():
     try:
         return send_from_directory(os.getcwd(), "dashboard.html")
     except Exception as e:
-        return f"Dashboard file not found: {str(e)}", 404
+        print(f"Dashboard error: {e}")
+        return f"Dashboard file not found. Error: {str(e)}", 404
 
 @app.route("/start", methods=["GET", "POST"])
 def start_bot():
