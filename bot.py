@@ -36,8 +36,16 @@ ws_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
 
 print("🚀 WebSocket Bot Started | Monitoring 5 major pairs")
 
-# Data storage for each symbol
+# Data storage for each symbol (Important: defined globally)
 dataframes = {symbol: pd.DataFrame(columns=["open", "high", "low", "close", "volume"]) for symbol in MAJOR_SYMBOLS}
+
+def set_leverage_for_all():
+    for symbol in MAJOR_SYMBOLS:
+        try:
+            exchange.set_leverage(LEVERAGE, symbol)
+            print(f"✅ Leverage {LEVERAGE}x set for {symbol}")
+        except Exception as e:
+            print(f"⚠️ Failed to set leverage for {symbol}: {e}")
 
 def apply_indicators(df):
     if len(df) < 20:
