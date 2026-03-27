@@ -12,7 +12,8 @@ bot_thread = None
 
 def signal_handler(sig, frame):
     print("🛑 Shutdown signal received")
-    bot.running = False
+    if hasattr(bot, 'running'):
+        bot.running = False
     sys.exit(0)
 
 signal.signal(signal.SIGTERM, signal_handler)
@@ -48,6 +49,7 @@ def start_bot():
     bot_thread.start()
 
     bot_running = True
+    print("🚀 Bot start command received")
     return jsonify({"status": "bot started", "running": True})
 
 @app.route("/stop", methods=["GET", "POST"])
@@ -55,6 +57,7 @@ def stop_bot():
     global bot_running
     bot.running = False
     bot_running = False
+    print("🛑 Bot stop command received")
     return jsonify({"status": "stop signal sent", "running": False})
 
 @app.route("/status")
