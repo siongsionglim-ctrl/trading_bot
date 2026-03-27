@@ -14,7 +14,7 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 LEVERAGE = 10
 COOLDOWN = 300
-MIN_SCORE = 8          # Testing with 8
+MIN_SCORE = 7          # Lowered for testing - we can raise later
 DF_WINDOW = 180
 
 last_trade_time = 0
@@ -28,19 +28,20 @@ exchange = ccxt.binance({
     "options": {"defaultType": "future"}
 })
 
-# Load Top 30 liquid pairs
+# Load Top 30 most liquid USDT perpetual futures
 print("📡 Loading Binance futures markets...")
 exchange.load_markets()
 
 all_futures = []
 for symbol, market in exchange.markets.items():
     try:
-        if (symbol.endswith('/USDT') or symbol.endswith('/USDT:USDT')) and market.get('active', False) and market.get('swap', False):
+        if (symbol.endswith('/USDT') or symbol.endswith('/USDT:USDT')) and \
+           market.get('active', False) and market.get('swap', False):
             all_futures.append(symbol)
     except:
         continue
 
-# Sort by volume
+# Sort by 24h volume (most liquid first)
 try:
     tickers = exchange.fetch_tickers()
     volume_dict = {s: float(tickers.get(s, {}).get('quoteVolume', 0)) for s in all_futures}
@@ -50,9 +51,11 @@ except:
 
 print(f"🚀 Scanning Top {len(MAJOR_SYMBOLS)} liquid pairs")
 
+# WebSocket setup
 streams = [s.replace("/", "").replace(":", "").lower() + "@kline_1m" for s in MAJOR_SYMBOLS]
 ws_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
 
+# Data storage for each symbol
 dataframes = {symbol: pd.DataFrame(columns=["open", "high", "low", "close", "volume"]) for symbol in MAJOR_SYMBOLS}
 
 def set_leverage_for_all():
@@ -92,7 +95,7 @@ def calculate_score(df, symbol):
     score = 0
     trend = None
 
-    # EMA + Price Alignment
+    # EMA Trend Alignment
     if last["ema20"] > last["ema50"] and last["close"] > last["ema20"]:
         score += 3
         trend = "LONG"
@@ -102,29 +105,29 @@ def calculate_score(df, symbol):
     else:
         return 0, None
 
-    # Higher TF Bias
+    # Higher Timeframe Bias (strong filter)
     bias = get_higher_tf_bias(symbol)
     if bias == trend:
         score += 4
     elif bias is not None:
-        return 0, None
+        return 0, None   # Opposite bias = no trade
 
-    # Momentum
+    # Momentum (MACD + RSI)
     if (trend == "LONG" and last["macd_hist"] > 0) or (trend == "SHORT" and last["macd_hist"] < 0):
         score += 2
     if (trend == "LONG" and 45 < last["rsi"] < 75) or (trend == "SHORT" and 28 < last["rsi"] < 55):
         score += 2
 
-    # Liquidity Sweep + Reversal
+    # Liquidity Sweep / Reversal
     if (last["high"] > prev["high"].max() and last["close"] < last["open"]) or \
        (last["low"] < prev["low"].min() and last["close"] > last["open"]):
         score += 3
 
-    # Volume + Strong Candle
+    # Volume Confirmation
     if last["volume"] > last["vol_avg"] * 1.7:
         score += 2
 
-    # Extra point for strong directional candle
+    # Strong Directional Candle
     if trend == "LONG" and last["close"] > last["open"]:
         score += 1
     elif trend == "SHORT" and last["close"] < last["open"]:
@@ -213,7 +216,7 @@ def place_trade(symbol, side, amount, price):
         exchange.create_order(symbol, "STOP_MARKET", sl_side, amount, None, {"stopPrice": sl_price, "reduceOnly": True})
         exchange.create_order(symbol, "TAKE_PROFIT_MARKET", tp_side, amount, None, {"stopPrice": tp_price, "reduceOnly": True})
 
-        print(f"🚀 {side} {symbol} | TP: {tp_price:.2f} | SL: {sl_price:.2f}")
+        print(f"🚀 SUCCESS: {side} {symbol} | TP: {tp_price:.2f} | SL: {sl_price:.2f}")
         last_trade_time = time.time()
 
     except Exception as e:
@@ -240,7 +243,7 @@ async def run():
 
                 if 'data' in data and 'k' in data['data']:
                     k = data['data']['k']
-                    if k['x']:
+                    if k['x']:  # only closed candles
                         raw_symbol = data['data']['s']
                         symbol = next((s for s in MAJOR_SYMBOLS if s.replace("/", "").replace(":", "") == raw_symbol), None)
                         if not symbol:
@@ -261,6 +264,11 @@ async def run():
                         df = apply_indicators(df)
 
                         score, trend = calculate_score(df, symbol)
+
+                        # Detailed logging for debugging
+                        if score > 0:
+                            print(f"Score for {symbol}: {score} ({trend})")
+
                         if score >= MIN_SCORE and trend:
                             price = df.iloc[-1]["close"]
                             print(f"🟢 STRONG SIGNAL: {trend} {symbol} | Score: {score} | Price: {price:.2f}")
@@ -268,6 +276,8 @@ async def run():
                             free_balance, _ = get_balance()
                             margin_needed = (free_balance * 0.02 * LEVERAGE) / price
                             amount = (free_balance * 0.02) / (price * 0.008)
+
+                            print(f"   → Calculated Amount: {amount:.6f} | Margin Needed: {margin_needed:.2f}")
 
                             if can_trade(symbol, margin_needed):
                                 place_trade(symbol, trend, amount, price)
