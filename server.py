@@ -21,7 +21,7 @@ signal.signal(signal.SIGINT, signal_handler)
 
 @app.route("/")
 def home():
-    return "Crypto Auto Bot Running ✅"
+    return "Crypto Auto Bot Running ✅ (5m Mode)"
 
 @app.route("/ping")
 def ping():
@@ -54,13 +54,14 @@ def start_bot():
     bot_thread.start()
 
     bot_running = True
-    print("🚀 Bot start command received")
+    print("🚀 Bot start command received (5m mode)")
     return jsonify({"status": "bot started", "running": True})
 
 @app.route("/stop", methods=["GET", "POST"])
 def stop_bot():
     global bot_running
-    bot.running = False
+    if hasattr(bot, 'running'):
+        bot.running = False
     bot_running = False
     print("🛑 Bot stop command received")
     return jsonify({"status": "stop signal sent", "running": False})

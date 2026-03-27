@@ -14,13 +14,17 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 LEVERAGE = 10
 COOLDOWN = 300
-MIN_SCORE = 8          # You said 8 is OK
-DF_WINDOW = 180
+MIN_SCORE = 8          # You can change to 7 for more signals during testing
+DF_WINDOW = 100        # Suitable for 5m timeframe
 
 last_trade_time = 0
 initial_balance = 0
 running = True
-top_signals = []       # For dashboard Top 5 table
+top_signals = []
+
+# Higher TF cache
+higher_tf_bias = {}
+last_higher_tf_time = {}
 
 exchange = ccxt.binance({
     "apiKey": API_KEY,
@@ -29,7 +33,6 @@ exchange = ccxt.binance({
     "options": {"defaultType": "future"}
 })
 
-# Safe list of major liquid pairs (no heavy load_markets at startup)
 MAJOR_SYMBOLS = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
     "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "SUI/USDT",
@@ -39,15 +42,16 @@ MAJOR_SYMBOLS = [
     "ENA/USDT", "WLD/USDT", "ONDO/USDT", "RENDER/USDT", "KAS/USDT"
 ]
 
-print(f"🚀 Scanning {len(MAJOR_SYMBOLS)} major liquid pairs")
+print(f"🚀 Scanning {len(MAJOR_SYMBOLS)} major liquid pairs on 5m timeframe")
 
-# WebSocket setup
-streams = [s.replace("/", "").replace(":", "").lower() + "@kline_1m" for s in MAJOR_SYMBOLS]
+# WebSocket for 5m candles
+streams = [s.replace("/", "").replace(":", "").lower() + "@kline_5m" for s in MAJOR_SYMBOLS]
 ws_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
 
 dataframes = {symbol: pd.DataFrame(columns=["open", "high", "low", "close", "volume"]) for symbol in MAJOR_SYMBOLS}
 
 def set_leverage_for_all():
+    print("🔧 Setting 10x leverage for all symbols...")
     for symbol in MAJOR_SYMBOLS:
         try:
             exchange.set_leverage(LEVERAGE, symbol)
@@ -58,6 +62,7 @@ def set_leverage_for_all():
 def apply_indicators(df):
     if len(df) < 20:
         return df
+    df = df.copy()
     df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
     df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
     df["vol_avg"] = df["volume"].rolling(20).mean()
@@ -74,66 +79,6 @@ def apply_indicators(df):
 
     return df
 
-def calculate_score(df, symbol):
-    if len(df) < 60:
-        return 0, None, {}
-
-    last = df.iloc[-1]
-    prev = df.iloc[-8:-1]
-
-    score = 0
-    trend = None
-    breakdown = {}
-
-    # EMA Trend
-    if last["ema20"] > last["ema50"] and last["close"] > last["ema20"]:
-        score += 3
-        trend = "LONG"
-        breakdown["EMA"] = 3
-    elif last["ema20"] < last["ema50"] and last["close"] < last["ema20"]:
-        score += 3
-        trend = "SHORT"
-        breakdown["EMA"] = 3
-    else:
-        return 0, None, {}
-
-    # Higher TF Bias
-    bias = get_higher_tf_bias(symbol)
-    if bias == trend:
-        score += 4
-        breakdown["HigherTF"] = 4
-    elif bias is not None:
-        return 0, None, {}
-
-    # MACD + RSI
-    if (trend == "LONG" and last["macd_hist"] > 0) or (trend == "SHORT" and last["macd_hist"] < 0):
-        score += 2
-        breakdown["MACD"] = 2
-    if (trend == "LONG" and 45 < last["rsi"] < 75) or (trend == "SHORT" and 28 < last["rsi"] < 55):
-        score += 2
-        breakdown["RSI"] = 2
-
-    # Liquidity Sweep
-    if (last["high"] > prev["high"].max() and last["close"] < last["open"]) or \
-       (last["low"] < prev["low"].min() and last["close"] > last["open"]):
-        score += 3
-        breakdown["Liquidity"] = 3
-
-    # Volume
-    if last["volume"] > last["vol_avg"] * 1.7:
-        score += 2
-        breakdown["Volume"] = 2
-
-    # Strong Candle
-    if trend == "LONG" and last["close"] > last["open"]:
-        score += 1
-        breakdown["Candle"] = 1
-    elif trend == "SHORT" and last["close"] < last["open"]:
-        score += 1
-        breakdown["Candle"] = 1
-
-    return score, trend, breakdown
-
 def get_higher_tf_bias(symbol):
     global higher_tf_bias, last_higher_tf_time
     now = time.time()
@@ -141,8 +86,9 @@ def get_higher_tf_bias(symbol):
         return higher_tf_bias.get(symbol)
 
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, "5m", limit=50)
-        df5 = pd.DataFrame(ohlcv, columns=["ts","o","h","l","c","v"])[["o","h","l","c","v"]].astype(float)
+        ohlcv = exchange.fetch_ohlcv(symbol, "15m", limit=50)
+        df5 = pd.DataFrame(ohlcv, columns=["ts", "o", "h", "l", "c", "v"])
+        df5 = df5[["o", "h", "l", "c", "v"]].astype(float)
         df5 = apply_indicators(df5)
         last = df5.iloc[-1]
 
@@ -154,7 +100,66 @@ def get_higher_tf_bias(symbol):
         return bias
     except Exception as e:
         print(f"⚠️ Higher TF bias error for {symbol}: {e}")
-        return higher_tf_bias.get(symbol)
+        return higher_tf_bias.get(symbol, None)
+
+def calculate_score(df, symbol):
+    if len(df) < 60:
+        return 0, None, {}
+
+    last = df.iloc[-1]
+    prev = df.iloc[-8:-1] if len(df) > 8 else df.iloc[:-1]
+
+    score = 0
+    trend = None
+    breakdown = {}
+
+    # EMA Trend + Price confirmation
+    if last["ema20"] > last["ema50"] and last["close"] > last["ema20"]:
+        score += 3
+        trend = "LONG"
+        breakdown["EMA"] = 3
+    elif last["ema20"] < last["ema50"] and last["close"] < last["ema20"]:
+        score += 3
+        trend = "SHORT"
+        breakdown["EMA"] = 3
+    else:
+        return 0, None, {}
+
+    # Higher TF Bias (must align)
+    bias = get_higher_tf_bias(symbol)
+    if bias == trend:
+        score += 4
+        breakdown["HigherTF"] = 4
+    elif bias is not None:
+        return 0, None, {}   # Strict filter - only trade when higher TF agrees
+
+    # MACD Confirmation
+    if (trend == "LONG" and last["macd_hist"] > 0) or (trend == "SHORT" and last["macd_hist"] < 0):
+        score += 2
+        breakdown["MACD"] = 2
+
+    # RSI Filter
+    if (trend == "LONG" and 45 < last["rsi"] < 75) or (trend == "SHORT" and 28 < last["rsi"] < 55):
+        score += 2
+        breakdown["RSI"] = 2
+
+    # Liquidity Sweep
+    if (last["high"] > prev["high"].max() and last["close"] < last["open"]) or \
+       (last["low"] < prev["low"].min() and last["close"] > last["open"]):
+        score += 3
+        breakdown["Liquidity"] = 3
+
+    # Volume Spike
+    if last["volume"] > last["vol_avg"] * 1.7:
+        score += 2
+        breakdown["Volume"] = 2
+
+    # Strong Candle
+    if (trend == "LONG" and last["close"] > last["open"]) or (trend == "SHORT" and last["close"] < last["open"]):
+        score += 1
+        breakdown["Candle"] = 1
+
+    return score, trend, breakdown
 
 def get_balance():
     try:
@@ -177,11 +182,8 @@ def has_position(symbol):
     except:
         return False
 
-def in_cooldown():
-    return time.time() - last_trade_time < COOLDOWN
-
 def can_trade(symbol, required_margin):
-    if in_cooldown() or has_position(symbol):
+    if time.time() - last_trade_time < COOLDOWN or has_position(symbol):
         print(f"❌ can_trade blocked for {symbol} (cooldown or position)")
         return False
     free, total = get_balance()
@@ -209,6 +211,7 @@ def place_trade(symbol, side, amount, price):
 
         sl_price = price * 0.994 if side == "LONG" else price * 1.006
         tp_price = price * 1.012 if side == "LONG" else price * 0.988
+
         sl_side = "sell" if side == "LONG" else "buy"
         tp_side = "sell" if side == "LONG" else "buy"
 
@@ -229,11 +232,12 @@ async def run():
 
     free, total = get_balance()
     initial_balance = total or 100
-    print(f"💰 Bot Started | Total Balance: {initial_balance:.2f} USDT")
-    print(f"🔌 Connecting to Binance WebSocket...")
+    print(f"💰 Bot Started | Total Balance: {initial_balance:.2f} USDT | 5m Candle Mode")
+
+    print("🔌 Connecting to Binance WebSocket (5m candles)...")
 
     async with websockets.connect(ws_url) as ws:
-        print("✅ WebSocket connected successfully")
+        print("✅ WebSocket connected successfully - Receiving live 5m candles")
 
         while running:
             signals_list = []
@@ -266,11 +270,10 @@ async def run():
                         score, trend, breakdown = calculate_score(df, symbol)
 
                         if score > 0:
-                            print(f"Score for {symbol}: {score} ({trend}) | Breakdown: {breakdown}")
+                            print(f"Score for {symbol}: {score} ({trend or 'NEUTRAL'}) | Breakdown: {breakdown}")
 
-                        # === TRADING DECISION ===
                         if score >= MIN_SCORE and trend:
-                            price = df.iloc[-1]["close"]
+                            price = float(df.iloc[-1]["close"])
                             print(f"🟢 STRONG SIGNAL: {trend} {symbol} | Score: {score} | Price: {price:.2f}")
 
                             free_balance, _ = get_balance()
@@ -282,7 +285,6 @@ async def run():
                             else:
                                 print(f"❌ Order blocked by can_trade() for {symbol}")
 
-                        # Collect for Top 5 dashboard
                         if score >= 5 and trend:
                             signals_list.append({
                                 "symbol": symbol,
@@ -295,7 +297,6 @@ async def run():
             except Exception as e:
                 print(f"WebSocket error: {e}")
 
-            # Update Top 5 every cycle
             if signals_list:
                 top_signals = sorted(signals_list, key=lambda x: x["score"], reverse=True)[:5]
 
