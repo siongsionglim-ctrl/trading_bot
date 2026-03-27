@@ -14,90 +14,44 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 LEVERAGE = 10
 COOLDOWN = 300
-MIN_SCORE = 10
+MIN_SCORE = 8
 DF_WINDOW = 180
 
 last_trade_time = 0
 initial_balance = 0
 running = True
 
-# Global caches for higher timeframe bias
-higher_tf_bias = {}
-last_higher_tf_time = {}
-
-# Initialize exchange
 exchange = ccxt.binance({
     "apiKey": API_KEY,
     "secret": API_SECRET,
     "enableRateLimit": True,
-    "options": {
-        "defaultType": "future",
-        "adjustForTimeDifference": True
-    }
+    "options": {"defaultType": "future"}
 })
 
-# === FIXED: Load and select Top 30 by real 24h volume ===
+# Load Top 30 liquid USDT perpetual futures
 print("📡 Loading Binance futures markets...")
 exchange.load_markets()
 
-# Filter active USDT perpetual futures
 all_futures = []
 for symbol, market in exchange.markets.items():
     try:
         if (symbol.endswith('/USDT') or symbol.endswith('/USDT:USDT')) and \
-           market.get('active', False) and \
-           (market.get('swap', False) or market.get('future', False)) and \
-           market.get('linear', False):
+           market.get('active', False) and market.get('swap', False):
             all_futures.append(symbol)
-    except Exception:
+    except:
         continue
 
-print(f"🚀 Loaded {len(all_futures)} USDT perpetuals")
-
-# ==================== FIXED MARKET LOADING - TOP 30 BY VOLUME ====================
-print("📡 Loading Binance futures markets...")
-exchange.load_markets()
-
-all_futures = []
-for symbol, market in exchange.markets.items():
-    try:
-        if (symbol.endswith('/USDT:USDT') or symbol.endswith('/USDT')) and \
-           market.get('active', False) and \
-           market.get('swap', False) and \
-           market.get('linear', False):
-            all_futures.append(symbol)
-    except Exception:
-        continue
-
-print(f"🚀 Loaded {len(all_futures)} USDT perpetuals")
-
-# === Sort by real 24h volume (most popular & liquid first) ===
-print("🔄 Fetching 24h volume to select Top 30 liquid pairs...")
+# Sort by volume (most liquid first)
 try:
     tickers = exchange.fetch_tickers()
-
-    volume_dict = {}
-    for symbol, ticker in tickers.items():
-        if symbol.endswith('/USDT:USDT') or symbol.endswith('/USDT'):
-            volume_dict[symbol] = float(ticker.get('quoteVolume') or 0)
-
-    sorted_futures = sorted(
-        all_futures,
-        key=lambda s: volume_dict.get(s, 0),
-        reverse=True
-    )
-
-    MAJOR_SYMBOLS = sorted_futures[:30]
-
-    print(f"✅ Selected Top {len(MAJOR_SYMBOLS)} most liquid pairs by 24h volume")
-    print(f"Example: {MAJOR_SYMBOLS[:8]}")   # This should show BTC, ETH, SOL, etc.
-
-except Exception as e:
-    print(f"⚠️ Volume fetch failed: {e}. Falling back to first 30.")
-    all_futures.sort()
+    volume_dict = {s: float(tickers.get(s, {}).get('quoteVolume', 0)) for s in all_futures}
+    MAJOR_SYMBOLS = sorted(all_futures, key=lambda s: volume_dict.get(s, 0), reverse=True)[:30]
+except:
     MAJOR_SYMBOLS = all_futures[:30]
 
-# WebSocket streams
+print(f"🚀 Scanning Top {len(MAJOR_SYMBOLS)} liquid pairs")
+
+# WebSocket setup
 streams = [s.replace("/", "").replace(":", "").lower() + "@kline_1m" for s in MAJOR_SYMBOLS]
 ws_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
 
@@ -110,7 +64,7 @@ def set_leverage_for_all():
             exchange.set_leverage(LEVERAGE, symbol)
             print(f"✅ Leverage {LEVERAGE}x set for {symbol}")
         except Exception as e:
-            print(f"⚠️ Failed to set leverage for {symbol}: {e}")
+            print(f"⚠️ Leverage set failed for {symbol}: {e}")
 
 def apply_indicators(df):
     if len(df) < 20:
@@ -132,6 +86,12 @@ def apply_indicators(df):
     return df
 
 def calculate_score(df, symbol):
+    # Extra point for strong directional candle
+    if trend == "LONG" and last["close"] > last["open"]:
+        score += 1
+    elif trend == "SHORT" and last["close"] < last["open"]:
+        score += 1
+        
     if len(df) < 60:
         return 0, None
     last = df.iloc[-1]
@@ -173,6 +133,7 @@ def calculate_score(df, symbol):
     return score, trend
 
 def get_higher_tf_bias(symbol):
+    global higher_tf_bias, last_higher_tf_time
     now = time.time()
     if symbol in last_higher_tf_time and now - last_higher_tf_time.get(symbol, 0) < 600:
         return higher_tf_bias.get(symbol)
@@ -219,16 +180,19 @@ def in_cooldown():
 
 def can_trade(symbol, required_margin):
     if in_cooldown() or has_position(symbol):
+        print(f"❌ can_trade blocked for {symbol} (cooldown or position)")
         return False
     free, total = get_balance()
     if free < 5:
         print(f"⛔ Free balance too low ({free:.2f} USDT)")
         return False
     if free < required_margin:
+        print(f"⛔ Not enough margin for {symbol}")
         return False
     if total < initial_balance * 0.70:
         print("🚨 Max drawdown reached")
         return False
+    print(f"✅ can_trade PASSED for {symbol}")
     return True
 
 def place_trade(symbol, side, amount, price):
@@ -276,7 +240,7 @@ async def run():
 
                 if 'data' in data and 'k' in data['data']:
                     k = data['data']['k']
-                    if k['x']:  # candle closed
+                    if k['x']:
                         raw_symbol = data['data']['s']
                         symbol = next((s for s in MAJOR_SYMBOLS if s.replace("/", "").replace(":", "") == raw_symbol), None)
                         if not symbol:
@@ -307,6 +271,8 @@ async def run():
 
                             if can_trade(symbol, margin_needed):
                                 place_trade(symbol, trend, amount, price)
+                            else:
+                                print(f"❌ Order blocked by can_trade() for {symbol}")
 
             except Exception as e:
                 print(f"WebSocket error: {e}")
