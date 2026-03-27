@@ -14,7 +14,7 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 LEVERAGE = 10
 COOLDOWN = 300
-MIN_SCORE = 8
+MIN_SCORE = 8          # Testing with 8
 DF_WINDOW = 180
 
 last_trade_time = 0
@@ -28,20 +28,19 @@ exchange = ccxt.binance({
     "options": {"defaultType": "future"}
 })
 
-# Load Top 30 liquid USDT perpetual futures
+# Load Top 30 liquid pairs
 print("📡 Loading Binance futures markets...")
 exchange.load_markets()
 
 all_futures = []
 for symbol, market in exchange.markets.items():
     try:
-        if (symbol.endswith('/USDT') or symbol.endswith('/USDT:USDT')) and \
-           market.get('active', False) and market.get('swap', False):
+        if (symbol.endswith('/USDT') or symbol.endswith('/USDT:USDT')) and market.get('active', False) and market.get('swap', False):
             all_futures.append(symbol)
     except:
         continue
 
-# Sort by volume (most liquid first)
+# Sort by volume
 try:
     tickers = exchange.fetch_tickers()
     volume_dict = {s: float(tickers.get(s, {}).get('quoteVolume', 0)) for s in all_futures}
@@ -51,11 +50,9 @@ except:
 
 print(f"🚀 Scanning Top {len(MAJOR_SYMBOLS)} liquid pairs")
 
-# WebSocket setup
 streams = [s.replace("/", "").replace(":", "").lower() + "@kline_1m" for s in MAJOR_SYMBOLS]
 ws_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
 
-# Data storage
 dataframes = {symbol: pd.DataFrame(columns=["open", "high", "low", "close", "volume"]) for symbol in MAJOR_SYMBOLS}
 
 def set_leverage_for_all():
@@ -86,20 +83,16 @@ def apply_indicators(df):
     return df
 
 def calculate_score(df, symbol):
-    # Extra point for strong directional candle
-    if trend == "LONG" and last["close"] > last["open"]:
-        score += 1
-    elif trend == "SHORT" and last["close"] < last["open"]:
-        score += 1
-        
     if len(df) < 60:
         return 0, None
+
     last = df.iloc[-1]
     prev = df.iloc[-8:-1]
 
     score = 0
     trend = None
 
+    # EMA + Price Alignment
     if last["ema20"] > last["ema50"] and last["close"] > last["ema20"]:
         score += 3
         trend = "LONG"
@@ -109,25 +102,32 @@ def calculate_score(df, symbol):
     else:
         return 0, None
 
+    # Higher TF Bias
     bias = get_higher_tf_bias(symbol)
     if bias == trend:
         score += 4
     elif bias is not None:
         return 0, None
 
+    # Momentum
     if (trend == "LONG" and last["macd_hist"] > 0) or (trend == "SHORT" and last["macd_hist"] < 0):
         score += 2
     if (trend == "LONG" and 45 < last["rsi"] < 75) or (trend == "SHORT" and 28 < last["rsi"] < 55):
         score += 2
 
+    # Liquidity Sweep + Reversal
     if (last["high"] > prev["high"].max() and last["close"] < last["open"]) or \
        (last["low"] < prev["low"].min() and last["close"] > last["open"]):
         score += 3
 
+    # Volume + Strong Candle
     if last["volume"] > last["vol_avg"] * 1.7:
         score += 2
-    body_ratio = abs(last["close"] - last["open"]) / (last["high"] - last["low"] + 1e-9)
-    if body_ratio > 0.65:
+
+    # Extra point for strong directional candle
+    if trend == "LONG" and last["close"] > last["open"]:
+        score += 1
+    elif trend == "SHORT" and last["close"] < last["open"]:
         score += 1
 
     return score, trend
