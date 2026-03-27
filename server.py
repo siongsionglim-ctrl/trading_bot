@@ -38,6 +38,11 @@ def dashboard():
     except Exception as e:
         return f"Dashboard error: {str(e)}", 404
 
+@app.route("/top_signals")
+def top_signals_route():
+    # Return the latest Top 5 signals from bot.py
+    return jsonify({"top_signals": getattr(bot, 'top_signals', [])})
+
 @app.route("/start", methods=["GET", "POST"])
 def start_bot():
     global bot_running, bot_thread

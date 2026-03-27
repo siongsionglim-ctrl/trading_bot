@@ -3,60 +3,109 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Trading Bot Control</title>
+    <title>Crypto Auto Bot Dashboard</title>
     <style>
-        body { font-family: Arial, sans-serif; text-align: center; padding: 40px; background: #0f0f0f; color: #0f0; }
-        h1 { color: #00ff00; }
-        button { 
-            padding: 15px 30px; margin: 10px; font-size: 18px; border: none; border-radius: 8px; cursor: pointer;
-        }
-        .start { background: #00cc00; color: white; }
-        .stop  { background: #cc0000; color: white; }
-        .status { background: #0066cc; color: white; }
-        .info { margin-top: 30px; font-size: 18px; }
-        pre { background: #111; padding: 15px; border-radius: 8px; text-align: left; max-width: 600px; margin: 20px auto; }
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f4f4f4; }
+        h1 { color: #333; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; background: white; }
+        th, td { padding: 12px; border: 1px solid #ddd; text-align: left; }
+        th { background: #007bff; color: white; }
+        .long { color: green; font-weight: bold; }
+        .short { color: red; font-weight: bold; }
+        .status { font-size: 1.2em; margin: 10px 0; }
+        button { padding: 10px 20px; margin: 5px; font-size: 1em; }
     </style>
 </head>
 <body>
-    <h1>🚀 Pro Trading Bot Control</h1>
-    <p>Your Render URL: <strong>https://trading-bot-n45w.onrender.com</strong></p>
-
-    <button class="start" onclick="startBot()">▶️ START BOT</button>
-    <button class="stop"  onclick="stopBot()">⏹️ STOP BOT</button>
-    <button class="status" onclick="checkStatus()">📊 CHECK STATUS</button>
-
-    <div class="info">
-        <h2>Status: <span id="statusText">Checking...</span></h2>
-        <pre id="log"></pre>
+    <h1>🚀 Crypto Auto Bot Dashboard</h1>
+    
+    <div class="status">
+        Status: <span id="status">Checking...</span>
     </div>
+
+    <button onclick="startBot()">Start Bot</button>
+    <button onclick="stopBot()">Stop Bot</button>
+    <button onclick="checkStatus()">Refresh Status</button>
+
+    <h2>🔥 Top 5 Strongest Signals (Auto Refresh)</h2>
+    <table id="signalsTable">
+        <thead>
+            <tr>
+                <th>Rank</th>
+                <th>Symbol</th>
+                <th>Trend</th>
+                <th>Score</th>
+                <th>Price</th>
+                <th>Breakdown</th>
+            </tr>
+        </thead>
+        <tbody></tbody>
+    </table>
 
     <script>
         const baseUrl = "https://trading-bot-n45w.onrender.com";
 
-        async function startBot() {
-            const res = await fetch(baseUrl + "/start", { method: "POST" });
-            const data = await res.json();
-            document.getElementById("log").textContent = JSON.stringify(data, null, 2);
-            checkStatus();
-        }
-
-        async function stopBot() {
-            const res = await fetch(baseUrl + "/stop", { method: "POST" });
-            const data = await res.json();
-            document.getElementById("log").textContent = JSON.stringify(data, null, 2);
-            checkStatus();
-        }
-
         async function checkStatus() {
-            const res = await fetch(baseUrl + "/status");
-            const data = await res.json();
-            document.getElementById("statusText").textContent = data.running ? "🟢 RUNNING" : "🔴 STOPPED";
-            document.getElementById("log").textContent = JSON.stringify(data, null, 2);
+            try {
+                const res = await fetch(baseUrl + "/status");
+                const data = await res.json();
+                document.getElementById("status").textContent = data.running ? "🟢 Running" : "🔴 Stopped";
+            } catch (e) {
+                document.getElementById("status").textContent = "❌ Error";
+            }
         }
 
-        // Auto refresh status
-        window.onload = checkStatus;
-        setInterval(checkStatus, 5000);   // auto check every 5 seconds
+        async function loadTopSignals() {
+            try {
+                const res = await fetch(baseUrl + "/top_signals");
+                const data = await res.json();
+                const tbody = document.querySelector("#signalsTable tbody");
+                tbody.innerHTML = "";
+
+                if (data.top_signals && data.top_signals.length > 0) {
+                    data.top_signals.forEach((signal, index) => {
+                        const breakdown = Object.entries(signal.breakdown || {})
+                            .map(([k, v]) => `${k}: +${v}`)
+                            .join(" | ");
+                        
+                        const row = document.createElement("tr");
+                        row.innerHTML = `
+                            <td>${index + 1}</td>
+                            <td><strong>${signal.symbol}</strong></td>
+                            <td class="${signal.trend.toLowerCase()}">${signal.trend}</td>
+                            <td><strong>${signal.score}</strong></td>
+                            <td>${signal.price.toFixed(2)}</td>
+                            <td>${breakdown || "N/A"}</td>
+                        `;
+                        tbody.appendChild(row);
+                    });
+                } else {
+                    const row = document.createElement("tr");
+                    row.innerHTML = `<td colspan="6" style="text-align:center; color:gray;">No strong signals yet...</td>`;
+                    tbody.appendChild(row);
+                }
+            } catch (e) {
+                console.log("Failed to load top signals");
+            }
+        }
+
+        function startBot() {
+            fetch(baseUrl + "/start", { method: "POST" });
+        }
+
+        function stopBot() {
+            fetch(baseUrl + "/stop", { method: "POST" });
+        }
+
+        // Auto refresh every 5 seconds
+        setInterval(() => {
+            checkStatus();
+            loadTopSignals();
+        }, 5000);
+
+        // Initial load
+        checkStatus();
+        loadTopSignals();
     </script>
 </body>
 </html>
