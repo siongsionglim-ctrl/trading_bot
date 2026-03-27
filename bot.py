@@ -14,13 +14,13 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 LEVERAGE = 10
 COOLDOWN = 300
-MIN_SCORE = 7          # Testing value
+MIN_SCORE = 8          # You said 8 is OK
 DF_WINDOW = 180
 
 last_trade_time = 0
 initial_balance = 0
 running = True
-top_signals = []       # ← New: Stores latest Top 5 signals with breakdown
+top_signals = []       # For dashboard Top 5 table
 
 exchange = ccxt.binance({
     "apiKey": API_KEY,
@@ -29,27 +29,19 @@ exchange = ccxt.binance({
     "options": {"defaultType": "future"}
 })
 
-# Load Top 30 liquid pairs
-print("📡 Loading Binance futures markets...")
-exchange.load_markets()
+# Safe list of major liquid pairs (no heavy load_markets at startup)
+MAJOR_SYMBOLS = [
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
+    "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "SUI/USDT",
+    "DOT/USDT", "TON/USDT", "NEAR/USDT", "WIF/USDT", "PEPE/USDT",
+    "1000PEPE/USDT", "ARB/USDT", "OP/USDT", "FIL/USDT", "ETC/USDT",
+    "ATOM/USDT", "INJ/USDT", "FET/USDT", "TAO/USDT", "HYPE/USDT",
+    "ENA/USDT", "WLD/USDT", "ONDO/USDT", "RENDER/USDT", "KAS/USDT"
+]
 
-all_futures = []
-for symbol, market in exchange.markets.items():
-    try:
-        if (symbol.endswith('/USDT') or symbol.endswith('/USDT:USDT')) and market.get('active', False) and market.get('swap', False):
-            all_futures.append(symbol)
-    except:
-        continue
+print(f"🚀 Scanning {len(MAJOR_SYMBOLS)} major liquid pairs")
 
-try:
-    tickers = exchange.fetch_tickers()
-    volume_dict = {s: float(tickers.get(s, {}).get('quoteVolume', 0)) for s in all_futures}
-    MAJOR_SYMBOLS = sorted(all_futures, key=lambda s: volume_dict.get(s, 0), reverse=True)[:30]
-except:
-    MAJOR_SYMBOLS = all_futures[:30]
-
-print(f"🚀 Scanning Top {len(MAJOR_SYMBOLS)} liquid pairs")
-
+# WebSocket setup
 streams = [s.replace("/", "").replace(":", "").lower() + "@kline_1m" for s in MAJOR_SYMBOLS]
 ws_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
 
@@ -160,10 +152,9 @@ def get_higher_tf_bias(symbol):
         higher_tf_bias[symbol] = bias
         last_higher_tf_time[symbol] = now
         return bias
-    except:
+    except Exception as e:
+        print(f"⚠️ Higher TF bias error for {symbol}: {e}")
         return higher_tf_bias.get(symbol)
-
-# ... (get_balance, has_position, in_cooldown, can_trade, place_trade functions remain the same as before)
 
 def get_balance():
     try:
@@ -191,7 +182,7 @@ def in_cooldown():
 
 def can_trade(symbol, required_margin):
     if in_cooldown() or has_position(symbol):
-        print(f"❌ can_trade blocked for {symbol}")
+        print(f"❌ can_trade blocked for {symbol} (cooldown or position)")
         return False
     free, total = get_balance()
     if free < 5:
@@ -214,7 +205,7 @@ def place_trade(symbol, side, amount, price):
         entry_side = "buy" if side == "LONG" else "sell"
         
         exchange.create_market_order(symbol, entry_side, amount)
-        print(f"✅ {side} ENTRY FILLED {symbol}")
+        print(f"✅ {side} ENTRY FILLED {symbol} | Amount: {amount:.4f}")
 
         sl_price = price * 0.994 if side == "LONG" else price * 1.006
         tp_price = price * 1.012 if side == "LONG" else price * 0.988
@@ -277,7 +268,22 @@ async def run():
                         if score > 0:
                             print(f"Score for {symbol}: {score} ({trend}) | Breakdown: {breakdown}")
 
-                        if score >= 5 and trend:   # Collect for Top 5 view
+                        # === TRADING DECISION ===
+                        if score >= MIN_SCORE and trend:
+                            price = df.iloc[-1]["close"]
+                            print(f"🟢 STRONG SIGNAL: {trend} {symbol} | Score: {score} | Price: {price:.2f}")
+
+                            free_balance, _ = get_balance()
+                            margin_needed = (free_balance * 0.02 * LEVERAGE) / price
+                            amount = (free_balance * 0.02) / (price * 0.008)
+
+                            if can_trade(symbol, margin_needed):
+                                place_trade(symbol, trend, amount, price)
+                            else:
+                                print(f"❌ Order blocked by can_trade() for {symbol}")
+
+                        # Collect for Top 5 dashboard
+                        if score >= 5 and trend:
                             signals_list.append({
                                 "symbol": symbol,
                                 "score": score,
