@@ -14,15 +14,14 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 LEVERAGE = 10
 COOLDOWN = 300
-MIN_SCORE = 8          # You can change to 7 for more signals during testing
-DF_WINDOW = 100        # Suitable for 5m timeframe
+MIN_SCORE = 8
+DF_WINDOW = 100
 
 last_trade_time = 0
 initial_balance = 0
 running = True
 top_signals = []
 
-# Higher TF cache
 higher_tf_bias = {}
 last_higher_tf_time = {}
 
@@ -44,7 +43,6 @@ MAJOR_SYMBOLS = [
 
 print(f"🚀 Scanning {len(MAJOR_SYMBOLS)} major liquid pairs on 5m timeframe")
 
-# WebSocket for 5m candles
 streams = [s.replace("/", "").replace(":", "").lower() + "@kline_5m" for s in MAJOR_SYMBOLS]
 ws_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
 
@@ -113,7 +111,7 @@ def calculate_score(df, symbol):
     trend = None
     breakdown = {}
 
-    # EMA Trend + Price confirmation
+    # EMA Trend
     if last["ema20"] > last["ema50"] and last["close"] > last["ema20"]:
         score += 3
         trend = "LONG"
@@ -122,26 +120,24 @@ def calculate_score(df, symbol):
         score += 3
         trend = "SHORT"
         breakdown["EMA"] = 3
-    else:
-        return 0, None, {}
 
-    # Higher TF Bias (must align)
+    # Higher TF Bias (relaxed a bit for visibility)
     bias = get_higher_tf_bias(symbol)
-    if bias == trend:
+    if bias == trend and bias is not None:
         score += 4
         breakdown["HigherTF"] = 4
     elif bias is not None:
-        return 0, None, {}   # Strict filter - only trade when higher TF agrees
+        breakdown["HigherTF"] = 0   # still record it
 
-    # MACD Confirmation
+    # MACD
     if (trend == "LONG" and last["macd_hist"] > 0) or (trend == "SHORT" and last["macd_hist"] < 0):
         score += 2
         breakdown["MACD"] = 2
 
-    # RSI Filter
-    if (trend == "LONG" and 45 < last["rsi"] < 75) or (trend == "SHORT" and 28 < last["rsi"] < 55):
-        score += 2
-        breakdown["RSI"] = 2
+    # RSI
+    if (trend == "LONG" and 40 < last["rsi"] < 80) or (trend == "SHORT" and 20 < last["rsi"] < 60):
+        score += 1
+        breakdown["RSI"] = 1
 
     # Liquidity Sweep
     if (last["high"] > prev["high"].max() and last["close"] < last["open"]) or \
@@ -149,17 +145,19 @@ def calculate_score(df, symbol):
         score += 3
         breakdown["Liquidity"] = 3
 
-    # Volume Spike
-    if last["volume"] > last["vol_avg"] * 1.7:
+    # Volume
+    if last["volume"] > last["vol_avg"] * 1.5:
         score += 2
         breakdown["Volume"] = 2
 
-    # Strong Candle
-    if (trend == "LONG" and last["close"] > last["open"]) or (trend == "SHORT" and last["close"] < last["open"]):
+    # Candle
+    if trend and ((trend == "LONG" and last["close"] > last["open"]) or (trend == "SHORT" and last["close"] < last["open"])):
         score += 1
         breakdown["Candle"] = 1
 
     return score, trend, breakdown
+
+# ... (get_balance, has_position, can_trade, place_trade functions remain the same as previous version)
 
 def get_balance():
     try:
@@ -269,8 +267,8 @@ async def run():
 
                         score, trend, breakdown = calculate_score(df, symbol)
 
-                        if score > 0:
-                            print(f"Score for {symbol}: {score} ({trend or 'NEUTRAL'}) | Breakdown: {breakdown}")
+                        # Always print score for visibility
+                        print(f"Score for {symbol}: {score} ({trend or 'NEUTRAL'}) | Breakdown: {breakdown}")
 
                         if score >= MIN_SCORE and trend:
                             price = float(df.iloc[-1]["close"])
@@ -285,7 +283,8 @@ async def run():
                             else:
                                 print(f"❌ Order blocked by can_trade() for {symbol}")
 
-                        if score >= 5 and trend:
+                        # Collect Top 5 even with lower scores for dashboard visibility
+                        if score >= 3 and trend:      # Lowered threshold for dashboard only
                             signals_list.append({
                                 "symbol": symbol,
                                 "score": score,
@@ -297,8 +296,12 @@ async def run():
             except Exception as e:
                 print(f"WebSocket error: {e}")
 
+            # Always update Top 5 with current best signals
             if signals_list:
                 top_signals = sorted(signals_list, key=lambda x: x["score"], reverse=True)[:5]
+            else:
+                # Even if no strong signals, keep previous or clear gracefully
+                pass
 
             await asyncio.sleep(0.05)
 

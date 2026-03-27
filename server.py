@@ -40,7 +40,6 @@ def dashboard():
 
 @app.route("/top_signals")
 def top_signals_route():
-    # Return the latest Top 5 signals from bot.py
     return jsonify({"top_signals": getattr(bot, 'top_signals', [])})
 
 @app.route("/start", methods=["GET", "POST"])
